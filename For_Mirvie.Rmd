@@ -1,0 +1,345 @@
+---
+title: "For_mirvie"
+author: "Gaia Andreoletti"
+date: "4/30/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+############
+# QC and plotting metrics of 4 experiments conducted at Mirvie
+# This data set contains gene counts across all genes and basic summary statistics for 4 different lab conditions (A, B, C, and D), we had 3 repeats across 2 sequencing runs. 
+# All counts are raw counts from a ’standard’ RNAseq pipeline similar to what you described on our call, trim reads, map reads, remove dups, convert to counts. 
+# Question: which of the 4 lab conditions perform best, if any are equally good, or some should be dropped?
+# 
+# R script by Gaia Andreoletti - 30 Apr 2022
+############
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r set the working directory}
+# set the working directory
+setwd('~/Downloads/DataGaia/')
+date_is <-Sys.time()
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r libraries, echo=FALSE}
+#load the libraries
+library(ggrepel)
+library(ggplot2)
+library(DESeq2)
+library(tidyverse)
+library(pheatmap)
+library(factoextra)
+library(ggrepel)
+library(arsenal)
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+library(dplyr)
+library(raincloudplots)
+library(PupillometryR)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r load the data , echo=FALSE}
+#load the data counts and summary statistics
+counts <- read.csv("gene_counts_technical_test.csv", header = TRUE, row.names = 1)
+# head(counts,2)
+# dim(counts) #60625    24
+
+statistics_data <- read.csv("Sample_metrics.csv", header = TRUE)
+ head(statistics_data,2)
+# dim(statistics_data) #24 13
+
+# Adding column based on the Sample column to the metadata to plot based on sequence and experiment type
+tmp <- statistics_data %>%
+  mutate(Seq_run = case_when(
+    endsWith(Sample, "seq1") ~ "seq1",
+    endsWith(Sample, "seq2") ~ "seq2"
+  ))
+
+tmp2 <- tmp %>%
+  mutate(Experiment = case_when(
+    startsWith(Sample, "A") ~ "A",
+    startsWith(Sample, "B") ~ "B",
+    startsWith(Sample, "C") ~ "C",
+    startsWith(Sample, "D") ~ "D"
+  ))
+
+Sample_metrics <- tmp2
+colnames(Sample_metrics) <- c("Sample","total_reads","Unique_reads","%_mithocondrial","Coding_bases_pct","UTR_bases_pct","Intronic_bases_pct","Intergenic_bases_pct","genes_cpm_above_0","genes_cpm_above_10","genes_cpm_above_50","3_Bias","5_3_Bias","Replicates", "Seq_run","Experiment")
+# head(Sample_metrics,2)
+
+#remove intermediate files
+rm(tmp,tmp2)
+```
+
+```{r create Deseq2, echo=FALSE}
+### create Deseq2 object for downstream analyses
+ncol(counts) == nrow(Sample_metrics)
+counts_ordered <- counts[,order(colnames(counts))]
+rownames(Sample_metrics) <- Sample_metrics$Sample
+Sample_metrics_ordered <- Sample_metrics[order(rownames(Sample_metrics)),]
+colnames(counts_ordered) == rownames(Sample_metrics_ordered)
+Sample_metrics_ordered$Replicates <- as.factor(Sample_metrics_ordered$Replicates)
+dds <- DESeqDataSetFromMatrix(countData = round(counts_ordered),
+                              colData = Sample_metrics_ordered,
+                              design = ~  Experiment)
+
+# cts = counts(dds)
+# geoMeans = apply(cts, 1, function(row) if (all(row == 0)) 0 else exp(mean(log(row[row != 0]))))
+# dds = estimateSizeFactors(dds, geoMeans=geoMeans)
+dds = estimateSizeFactors(dds)
+#remove genes with 0 counts
+dds <- dds[ rowSums( counts(dds) ) > 0 , ]
+dds <- DESeq(dds)
+summary(dds) 
+#"DESeqDataSet object of length 25116 with 30 metadata columns"
+
+#Normalised 'counts' will be positive only, and will follow a negative binomial distribution.
+# Variance stabilised expression levels will follow a distribution more approaching normality - think logged data.
+vsd <- vst(dds, blind=FALSE, fitType='local')
+```
+
+```{r PCA_QC, echo=FALSE}
+## Related to the distance matrix is the PCA plot, which shows the samples in the 2D plane spanned by their first two principal components. 
+# This type of plot is useful for visualizing the overall effect of experimental covariates and batch effects.
+
+pdf("PCA_QC.pdf", paper = "USr")
+DESeq2::plotPCA(vsd, intgroup="Experiment")+ ggtitle("Experiment")
+DESeq2::plotPCA(vsd, intgroup="Replicates")+ ggtitle("Replicates")
+DESeq2::plotPCA(vsd, intgroup="Seq_run")+ ggtitle("Seq_run")
+DESeq2::plotPCA(vsd, intgroup="Sample")+ ggtitle("Sample") +   geom_text_repel(aes(label = name), max.overlaps = Inf, show.legend  = FALSE) +
+  geom_point(color = 'red') + theme_classic(base_size = 12) + theme(legend.position = "none")
+dev.off() 
+
+## TO PLOT PC2 AND PC3 I NEED TO CREATE A NEW FUNCITON 
+plotPCA <- function (object, intgroup = "Experiment", ntop = 500, returnData = FALSE) 
+{
+    rv <- rowVars(assay(object))
+    select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, 
+        length(rv)))]
+    pca <- prcomp(t(assay(object)[select, ]))
+    percentVar <- pca$sdev^2/sum(pca$sdev^2)
+    if (!all(intgroup %in% names(colData(object)))) {
+        stop("the argument 'intgroup' should specify columns of colData(dds)")
+    }
+    intgroup.df <- as.data.frame(colData(object)[, intgroup, 
+        drop = FALSE])
+    group <- if (length(intgroup) > 1) {
+        factor(apply(intgroup.df, 1, paste, collapse = " : "))
+    }
+    else {
+        colData(object)[[intgroup]]
+    }
+    d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], PC3 = pca$x[, 3], PC4 = pca$x[, 4], group = group, 
+        intgroup.df, name = colnames(object))
+    if (returnData) {
+        attr(d, "percentVar") <- percentVar[1:2]
+        return(d)
+    }
+    ggplot(data = d, aes_string(x = "PC3", y = "PC4", color = "group")) + 
+        geom_point(size = 3) + xlab(paste0("PC3: ", round(percentVar[1] * 
+        100), "% variance")) + ylab(paste0("PC4: ", round(percentVar[2] * 
+        100), "% variance")) + coord_fixed()
+}
+
+# print(plotPCA(vsd, intgroup=c("Experiment", "Replicates")))
+print(plotPCA(vsd, intgroup="Experiment"))
+
+
+```
+
+```{r sampleDists, echo=FALSE}
+##A heatmap of this distance matrix gives us an overview over similarities and dissimilarities between samples. 
+sampleDists <- dist(t(assay(vsd)))
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- vsd$Sample
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+```
+
+```{r test for outliers called Cook’s distance, echo=FALSE}
+#The DESeq function calculates, for every gene and for every sample, a diagnostic test for outliers called Cook’s distance. 
+# Cook’s distance is a measure of how much a single sample is influencing the fitted coefficients for a gene, and a large value of Cook’s distance is intended to indicate an outlier count. The Cook’s distances are stored as a matrix available in assays(dds)[["cooks"]].
+par(mar=c(8,5,2,2))
+boxplot(log10(assays(dds)[["cooks"]]), range=0, las=2)
+```
+
+
+
+
+
+```{r Select data for the 1000 most variable genes from the 14994 filtered genes, echo=FALSE}
+coldata <- as.data.frame(colData(dds))
+countsall <- as.data.frame(counts(dds, normalized = TRUE)) #25116    24
+
+# Filter lowly expressed genes
+# Keep genes that have >= 5  norm counts in at least 1 sample. 14994 genes remain.
+countsall.f2 <- round(filter_all(countsall, any_vars(. >= 5)), digits = 2) 
+dim(countsall.f2)
+
+# Log2 transformation
+countsall.f2.log <- round(log((countsall.f2+1), base = 2), digits = 3)
+
+
+countsall.f2.log_var <- countsall.f2.log
+countsall.f2.log_var$var <- apply(countsall.f2.log, 1, var)
+countsall.f2.log_var <- countsall.f2.log_var %>% slice_max(var, n=1000) %>% select(-var)
+
+sample_col <- coldata %>% select(Experiment, Seq_run, Sample)
+heatmap_0 <- pheatmap(countsall.f2.log_var,
+                      border_color = NA, breaks = seq(0, 24, length.out = 101),
+                      cluster_rows = TRUE, cluster_cols = TRUE,
+                      clustering_distance_rows = "euclidean",
+                      clustering_method = "average",
+                      display_numbers = F, number_format = "%.2f", number_color = "grey30",
+                      show_rownames = F, treeheight_row = 0,
+                      annotation_col = sample_col)
+
+pdf('heatmap_1000MostVariableGenes.pdf', height = 8, width = 10)
+heatmap_0
+dev.off()
+
+```
+
+```{r summary statistics, echo=FALSE}
+#### Table to be exported in excel for example with the different summary staistics
+data <- Sample_metrics
+data$Sample <- NULL
+table_one <- tableby(Experiment ~ ., data = data)
+summary(table_one, title = "Experiment Data")
+# as.data.frame(table_one)
+# tab1 <- tableby(Replicates ~ total_reads + Unique_reads, data=data)
+# summary(tab1)
+```
+
+```{r genes_cpm_above_, echo=FALSE}
+ggplot(Sample_metrics, aes(x=Experiment, y=genes_cpm_above_0, color=Experiment)) +
+  geom_boxplot() + 
+  theme(legend.position = "none") + 
+  facet_wrap(~Replicates, scale="free") +
+   coord_cartesian(ylim = c(10950, 17656))
+ggsave("genes_cpm_above_0.pdf", height=4, width=5.5)
+
+ggplot(Sample_metrics, aes(x=Experiment, y=genes_cpm_above_10, color=Experiment)) +
+  geom_boxplot() + 
+  theme(legend.position = "none") + 
+  facet_wrap(~Replicates, scale="free") +
+  coord_cartesian(ylim = c(7643, 8613))
+ggsave("genes_cpm_above_10.pdf", height=4, width=5.5)
+
+
+ggplot(Sample_metrics, aes(x=Experiment, y=genes_cpm_above_50, color=Experiment)) +
+  geom_boxplot() + 
+  theme(legend.position = "none") + 
+  facet_wrap(~Replicates, scale="free") +
+  coord_cartesian(ylim = c(3541, 4008))
+ggsave("genes_cpm_above_50.pdf", height=4, width=5.5)
+```
+```{r pressure, echo=FALSE}
+```
+
+```{r pressusome % stats, echo=FALSE}
+library(reshape2)
+temp <- subset(Sample_metrics, select=c("%_mithocondrial","Coding_bases_pct", "UTR_bases_pct","Intronic_bases_pct" ,"Intergenic_bases_pct", "Experiment"))
+temp_melt <- melt(temp)
+p <- ggplot(temp_melt, aes(x = Experiment, y = value, fill = variable)) + geom_col(position = "dodge")  
+p +  scale_y_continuous(breaks = seq(0, 80, len = 5))
+ggsave("stats.pdf", height=4, width=5.5)
+
+temp <- subset(Sample_metrics, select=c("3_Bias","5_3_Bias", "Experiment"))
+temp_melt <- melt(temp)
+p <- ggplot(temp_melt, aes(x = Experiment, y = value, fill = variable)) + geom_col(position = "dodge")  
+p +  scale_y_continuous(breaks = seq(0, 10, len = 1))
+ggsave("stats.pdf", height=4, width=5.5)
+
+  scale_y_continuous(breaks = seq(0, 100, len = 5), name="Stopping distance", limits=c(0, 100))
+
+temp <- subset(Sample_metrics, select=c("%_mithocondrial","Coding_bases_pct", "UTR_bases_pct","Intronic_bases_pct" ,"Intergenic_bases_pct","3_Bias","5_3_Bias", "Experiment"))
+ggplot(temp_melt, aes(x = Experiment, y = value, fill = variable)) + geom_col(position = "dodge")  
+ggsave("Biases.pdf", height=4, width=5.5)
+rm(tmp)
+```
+
+```{r raindrop plots, echo=FALSE}
+my_comparisons <- list( c("1", "2"), c("1", "3"), c("2", "3") )
+my_comparisons2 <- list( c("A", "B"), c("A", "C"), c("A", "D"), c("B", "C"),c("B", "D"), c("C", "D"))
+
+g <- ggplot(Sample_metrics, aes(x = Experiment, y = total_reads)) + 
+  ggdist::stat_halfeye(
+    adjust = .5, 
+    width = .6, 
+    .width = 0, 
+    justification = -.2, 
+    point_colour = NA
+  ) + 
+  geom_boxplot(
+    width = .15, 
+    outlier.shape = NA
+  ) +
+  ## add justified jitter from the {gghalves} package
+  gghalves::geom_half_point(
+    ## draw jitter on the left
+    side = "l", 
+    ## control range of jitter
+    range_scale = .4, 
+    ## add some transparency
+    alpha = .3
+  ) +
+  coord_cartesian(xlim = c(1.2, NA), clip = "off")  
++ facet_wrap(~Replicates, scale="free") 
+# g  + stat_compare_means(comparisons = my_comparisons2)
+ g  + stat_compare_means()
+g + coord_cartesian(ylim = c(6839460, 53662490))
+ggsave("Total_reads_pval.pdf", height=4, width=5.5)
+```
+
+```{r Unique_reads, echo=FALSE}
+g <- ggplot(Sample_metrics, aes(x = Experiment, y = Unique_reads)) + 
+  ggdist::stat_halfeye(
+    adjust = .5, 
+    width = .6, 
+    .width = 0, 
+    justification = -.2, 
+    point_colour = NA
+  ) + 
+  geom_boxplot(
+    width = .15, 
+    outlier.shape = NA
+  ) +
+  ## add justified jitter from the {gghalves} package
+  gghalves::geom_half_point(
+    ## draw jitter on the left
+    side = "l", 
+    ## control range of jitter
+    range_scale = .4, 
+    ## add some transparency
+    alpha = .3
+  ) +
+  coord_cartesian(xlim = c(1.2, NA), clip = "off")  
++ facet_wrap(~Replicates, scale="free") 
+# g  + stat_compare_means(comparisons = my_comparisons2)
+g  + stat_compare_means()
+g + coord_cartesian(ylim = c(6839460, 53662490))
+ggsave("Unique_reads_reads_pval.pdf", height=4, width=5.5)
+```
+
+##END
